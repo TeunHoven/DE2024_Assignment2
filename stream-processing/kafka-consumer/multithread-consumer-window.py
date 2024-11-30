@@ -8,6 +8,7 @@ from kafka import KafkaConsumer
 from google.oauth2 import service_account
 from google.cloud import bigquery
 
+from datetime import datetime
 
 
 # if you want to learn about threading in python, check the following article
@@ -28,7 +29,7 @@ class KafkaMessageConsumer(Thread):
     def __init__(self, topic, time_between_reads=30, header="value"):
         Thread.__init__(self)
         self.topic = topic
-        self.consumer = KafkaConsumer(bootstrap_servers='34.44.153.3:9092',  # use your VM's external IP Here!
+        self.consumer = KafkaConsumer(bootstrap_servers='34.30.212.168:9092',  # use your VM's external IP Here!
                                       auto_offset_reset='earliest',
                                       consumer_timeout_ms=10000)
 
@@ -39,13 +40,30 @@ class KafkaMessageConsumer(Thread):
         self.client = bigquery.Client(credentials=credentials)
 
     def update_table(self, data):
-        for service, value in data:
-            print(f"Updating {service} with {value} in {self.topic}")
-            stmt = f"""
-                UPDATE Assignment_Data.{self.topic}
-                SET amount_movies = {value}
-                WHERE service = '{service}';
-            """
+        all_values = []
+
+        for key, value in data:
+            splitted_key = key.split(";")
+
+            if len(splitted_key) != 3:
+                logging.error(f"Key {key} is not in the right format")
+                continue
+            window_start = splitted_key[0]
+            window_length = splitted_key[1]
+            service = splitted_key[2]
+
+            window_start = datetime.strptime(window_start, "%Y-%m-%d %H:%M:%S")
+
+            value = int(value)
+
+            value = f"('{window_start}', {window_length}, '{service}', {value})"
+            all_values.append(value)
+
+        stmt = f"""
+            INSERT Assignment_Data.{self.topic}_window
+            (window_start, window_length, service, amount_movies)
+            VALUES {",".join(all_values)};
+        """
 
         query_job = self.client.query(stmt)  # API request
         query_job.result()
@@ -60,30 +78,9 @@ class KafkaMessageConsumer(Thread):
 
         if len(data) > 0:
             self.update_table(data)
-            print(tabulate(data, headers=["Service", self.header]) + "\n")	
-
-    def check_table(self):
-        stmt = f"""
-            SELECT * FROM Assignment_Data.{self.topic}
-            WHERE service = 'Netflix' OR service = 'Disney Plus' OR service = 'Amazon Prime';
-        """
-
-        query_job = self.client.query(stmt)  # API request
-        query_job.result()
-
-        # Check if "Netflix", "Disney Plus" and "Amazon Prime" are in the table
-        if len(list(query_job)) < 3:
-            stmt = f"""
-                INSERT Assignment_Data.{self.topic}
-                (service, amount_movies)
-                VALUES ('Netflix', 0), ('Disney Plus', 0), ('Amazon Prime', 0);
-            """
-
-            query_job = self.client.query(stmt)
+            print(tabulate(data, headers=["Service", self.header]) + "\n")
 
     def run(self):
-        self.check_table()
-
         while True:
             try:
                 self.read_from_topic()
